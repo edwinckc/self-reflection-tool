@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Self-Reflection Tool</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div class="header-left">
+        <h1 class="app-title">Self-Reflection Tool</h1>
+      </div>
+      <div class="header-right" id="user-info">
+        <span class="user-loading">Loading...</span>
+      </div>
+    </header>
+
+    <div class="app-layout">
+      <main class="main-content" id="main-content">
+        <!-- Wizard or dashboard will be rendered here -->
+        <div id="loading-screen" class="loading-screen">
+          <p>Initializing...</p>
+        </div>
+      </main>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <h2>Questions</h2>
+        </div>
+        <div class="sidebar-content" id="questions-panel">
+          <p class="sidebar-placeholder">Complete the setup wizard to see reflection questions.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="/client/quick.js"></script>
+  <script type="module">
+    // Pre-load OpenAI SDK for later use in reflection generation
+    import OpenAI from 'https://cdn.jsdelivr.net/npm/openai/+esm';
+    window.OpenAI = OpenAI;
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
