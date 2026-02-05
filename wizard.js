@@ -1,5 +1,6 @@
 import { encryptToken, decryptToken } from './crypto.js';
 import { testPat, fetchMergedPRs } from './github.js';
+import { runAnalysisPipeline, loadAssessment } from './clustering.js';
 
 const TOTAL_STEPS = 4;
 const STALE_HOURS = 24;
@@ -25,7 +26,7 @@ export async function hasCompletedWizard(email) {
  * Show a simple dashboard after wizard is complete.
  * If PRs haven't been fetched yet, kicks off the fetch flow.
  */
-export function showDashboard(user, profile) {
+export async function showDashboard(user, profile) {
   const main = document.getElementById('main-content');
 
   // Check if we should fetch PRs
@@ -37,11 +38,14 @@ export function showDashboard(user, profile) {
     }
   }
 
+  // Load existing assessment data
+  const assessment = await loadAssessment(user.email);
+
   main.innerHTML = `
     <div class="wizard">
       <div class="wizard-body">
         <h2>Welcome back, ${user.fullName || user.email}</h2>
-        <p class="step-description">Your setup is complete. Reflection questions will appear in the sidebar.</p>
+        <p class="step-description">Your setup is complete. ${assessment ? 'Your analysis is ready.' : 'Reflection questions will appear in the sidebar.'}</p>
         <div class="confirmation-card" style="margin-top: var(--spacing-lg);">
           <div class="confirmation-row">
             <span class="confirmation-label">Level</span>
@@ -56,14 +60,30 @@ export function showDashboard(user, profile) {
             <span class="confirmation-value">${profile.githubPat ? '●●●●●●●●' : 'Not set'}</span>
           </div>
           ${renderPRSummaryRow(user.email)}
+          ${assessment ? `
+            <div class="confirmation-row">
+              <span class="confirmation-label">Projects</span>
+              <span class="confirmation-value">${assessment.clusters.length} clusters identified</span>
+            </div>
+            <div class="confirmation-row">
+              <span class="confirmation-label">Questions</span>
+              <span class="confirmation-value">${assessment.questions.reduce((s, q) => s + q.questions.length, 0)} reflection questions</span>
+            </div>
+          ` : ''}
         </div>
-        <div style="margin-top: var(--spacing-lg); display: flex; gap: var(--spacing-sm);">
+        <div style="margin-top: var(--spacing-lg); display: flex; gap: var(--spacing-sm); flex-wrap: wrap;">
           <button class="btn btn-secondary" id="restart-wizard-btn">Redo Setup</button>
           ${profile.githubPat ? '<button class="btn btn-secondary" id="refetch-prs-btn">Re-fetch PRs</button>' : ''}
+          ${assessment ? '<button class="btn btn-secondary" id="rerun-analysis-btn">Re-run Analysis</button>' : ''}
         </div>
       </div>
     </div>
   `;
+
+  // Populate sidebar with questions if assessment exists
+  if (assessment) {
+    renderQuestionsSidebar(assessment);
+  }
 
   document.getElementById('restart-wizard-btn').addEventListener('click', () => {
     import('./app.js').then(({ LEVELS, mapTitleToLevel }) => {
@@ -76,6 +96,18 @@ export function showDashboard(user, profile) {
   if (refetchBtn) {
     refetchBtn.addEventListener('click', () => {
       showFetchScreen(user, profile, true);
+    });
+  }
+
+  const rerunBtn = document.getElementById('rerun-analysis-btn');
+  if (rerunBtn) {
+    rerunBtn.addEventListener('click', () => {
+      const prData = getCachedPRData(user.email, profile.periodStart, profile.periodEnd);
+      if (prData) {
+        showAnalysisScreen(user, profile, prData.prs);
+      } else {
+        showFetchScreen(user, profile, true);
+      }
     });
   }
 }
@@ -245,7 +277,7 @@ function showFetchSuccess(main, user, profile, prs) {
   `;
 
   document.getElementById('continue-to-dashboard').addEventListener('click', () => {
-    showDashboard(user, profile);
+    showAnalysisScreen(user, profile, prs);
   });
 }
 
@@ -334,6 +366,177 @@ function showManualEntry(main, user, profile) {
   });
 }
 
+// ── Analysis Screen ──
+
+async function showAnalysisScreen(user, profile, prs) {
+  const main = document.getElementById('main-content');
+
+  main.innerHTML = `
+    <div class="wizard">
+      <div class="wizard-body fetch-screen">
+        <h2>Analyzing Your Work</h2>
+        <p class="step-description">Using AI to understand your contributions and prepare reflection questions...</p>
+        <div class="analysis-stages">
+          <div class="analysis-stage" id="stage-1">
+            <div class="stage-indicator pending"></div>
+            <div class="stage-content">
+              <div class="stage-label">Clustering PRs into projects...</div>
+              <div class="stage-detail" id="stage-1-detail"></div>
+            </div>
+          </div>
+          <div class="analysis-stage" id="stage-2">
+            <div class="stage-indicator pending"></div>
+            <div class="stage-content">
+              <div class="stage-label">Mapping to Impact Handbook...</div>
+              <div class="stage-detail" id="stage-2-detail"></div>
+            </div>
+          </div>
+          <div class="analysis-stage" id="stage-3">
+            <div class="stage-indicator pending"></div>
+            <div class="stage-content">
+              <div class="stage-label">Generating questions...</div>
+              <div class="stage-detail" id="stage-3-detail"></div>
+            </div>
+          </div>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="analysis-progress-fill" style="width: 0%"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  let currentStep = 0;
+
+  try {
+    const assessment = await runAnalysisPipeline(
+      prs,
+      profile.level,
+      user.email,
+      ({ step, label, detail }) => {
+        // Update stage indicators
+        if (step !== currentStep) {
+          // Mark previous stage as complete
+          if (currentStep > 0) {
+            const prevStage = document.getElementById(`stage-${currentStep}`);
+            if (prevStage) {
+              prevStage.querySelector('.stage-indicator').className = 'stage-indicator completed';
+            }
+          }
+
+          // Mark current stage as active
+          const curStage = document.getElementById(`stage-${step}`);
+          if (curStage) {
+            curStage.querySelector('.stage-indicator').className = 'stage-indicator active';
+          }
+
+          currentStep = step;
+        }
+
+        // Update label text
+        const stageEl = document.getElementById(`stage-${step}`);
+        if (stageEl) {
+          const labelEl = stageEl.querySelector('.stage-label');
+          if (labelEl) labelEl.textContent = label;
+        }
+
+        // Update progress bar (3 stages total)
+        const progressFill = document.getElementById('analysis-progress-fill');
+        if (progressFill) {
+          const pct = Math.round(((step - 1) / 3) * 100 + 33 / 3);
+          progressFill.style.width = `${Math.min(pct, 100)}%`;
+        }
+      },
+    );
+
+    // Mark final stage complete
+    const finalStage = document.getElementById('stage-3');
+    if (finalStage) {
+      finalStage.querySelector('.stage-indicator').className = 'stage-indicator completed';
+    }
+    const progressFill = document.getElementById('analysis-progress-fill');
+    if (progressFill) progressFill.style.width = '100%';
+
+    // Brief pause so the user sees completion
+    await new Promise(r => setTimeout(r, 500));
+
+    showAnalysisComplete(main, user, profile, assessment);
+  } catch (e) {
+    console.error('Analysis pipeline failed:', e);
+    showAnalysisError(main, user, profile, prs, e.message);
+  }
+}
+
+function showAnalysisComplete(main, user, profile, assessment) {
+  const totalQuestions = assessment.questions.reduce((sum, q) => sum + q.questions.length, 0);
+
+  main.innerHTML = `
+    <div class="wizard">
+      <div class="wizard-body fetch-screen">
+        <div class="fetch-success-icon">&#10003;</div>
+        <h2>Analysis Complete</h2>
+        <p class="step-description">Your work has been organized and reflection questions are ready.</p>
+        <div class="pr-summary-stats">
+          <div class="stat-card">
+            <div class="stat-value">${assessment.clusters.length}</div>
+            <div class="stat-label">Projects Identified</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">${assessment.mappings.length}</div>
+            <div class="stat-label">Handbook Mappings</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">${totalQuestions}</div>
+            <div class="stat-label">Reflection Questions</div>
+          </div>
+        </div>
+        <div class="cluster-preview">
+          ${assessment.clusters.map(c => `
+            <div class="cluster-card">
+              <div class="cluster-name">${escapeHtml(c.name)}</div>
+              <div class="cluster-summary">${escapeHtml(c.summary)}</div>
+              <div class="cluster-meta">${c.prs.length} PR${c.prs.length !== 1 ? 's' : ''}</div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="margin-top: var(--spacing-lg);">
+          <button class="btn btn-primary" id="continue-to-dashboard-final">Continue to Dashboard</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('continue-to-dashboard-final').addEventListener('click', () => {
+    showDashboard(user, profile);
+  });
+}
+
+function showAnalysisError(main, user, profile, prs, errorMessage) {
+  main.innerHTML = `
+    <div class="wizard">
+      <div class="wizard-body fetch-screen">
+        <div class="fetch-error-icon">!</div>
+        <h2>Analysis Failed</h2>
+        <p class="step-description">${escapeHtml(errorMessage)}</p>
+        <div style="margin-top: var(--spacing-lg); display: flex; gap: var(--spacing-sm); flex-wrap: wrap;">
+          <button class="btn btn-primary" id="retry-analysis-btn">Retry Analysis</button>
+          <button class="btn btn-secondary" id="skip-analysis-btn">Skip to Dashboard</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('retry-analysis-btn').addEventListener('click', () => {
+    showAnalysisScreen(user, profile, prs);
+  });
+
+  document.getElementById('skip-analysis-btn').addEventListener('click', () => {
+    showDashboard(user, profile);
+  });
+}
+
 // ── Helpers ──
 
 function countUniqueRepos(prs) {
@@ -353,6 +556,32 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function renderQuestionsSidebar(assessment) {
+  const panel = document.getElementById('questions-panel');
+  if (!panel || !assessment) return;
+
+  const html = assessment.questions.map(cq => {
+    const cluster = assessment.clusters.find(c => c.id === cq.clusterId);
+    const clusterName = cluster ? cluster.name : cq.clusterId;
+
+    return `
+      <div class="sidebar-cluster">
+        <h3 class="sidebar-cluster-name">${escapeHtml(clusterName)}</h3>
+        <ul class="sidebar-questions">
+          ${cq.questions.map(q => `
+            <li class="sidebar-question">
+              <span class="question-text">${escapeHtml(q.text)}</span>
+              ${q.context ? `<span class="question-context">${escapeHtml(q.context)}</span>` : ''}
+            </li>
+          `).join('')}
+        </ul>
+      </div>
+    `;
+  }).join('');
+
+  panel.innerHTML = html || '<p class="sidebar-placeholder">No questions generated yet.</p>';
 }
 
 // ── Wizard ──
