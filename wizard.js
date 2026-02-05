@@ -1,3 +1,5 @@
+import { isValidPATFormat, testPAT } from './github.js';
+
 const TOTAL_STEPS = 4;
 
 /**
@@ -22,39 +24,58 @@ export async function hasCompletedWizard(email) {
  */
 export function showDashboard(user, profile) {
   const main = document.getElementById('main-content');
-  main.innerHTML = `
-    <div class="wizard">
-      <div class="wizard-body">
-        <h2>Welcome back, ${user.fullName || user.email}</h2>
-        <p class="step-description">Your setup is complete. Reflection questions will appear in the sidebar.</p>
-        <div class="confirmation-card" style="margin-top: var(--spacing-lg);">
-          <div class="confirmation-row">
-            <span class="confirmation-label">Level</span>
-            <span class="confirmation-value">${profile.level}</span>
-          </div>
-          <div class="confirmation-row">
-            <span class="confirmation-label">Review Period</span>
-            <span class="confirmation-value">${profile.periodStart} — ${profile.periodEnd}</span>
-          </div>
-          <div class="confirmation-row">
-            <span class="confirmation-label">GitHub PAT</span>
-            <span class="confirmation-value">${profile.githubPat ? '●●●●●●●●' : 'Not set'}</span>
-          </div>
+  const nameEl = document.createElement('span');
+  nameEl.textContent = user.fullName || user.email;
+
+  main.innerHTML = '';
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'wizard';
+  wrapper.innerHTML = `
+    <div class="wizard-body">
+      <h2></h2>
+      <p class="step-description">Your setup is complete. Reflection questions will appear in the sidebar.</p>
+      <div class="confirmation-card" style="margin-top: var(--spacing-lg);">
+        <div class="confirmation-row">
+          <span class="confirmation-label">Level</span>
+          <span class="confirmation-value">${escapeHtml(profile.level)}</span>
         </div>
-        <div style="margin-top: var(--spacing-lg);">
-          <button class="btn btn-secondary" id="restart-wizard-btn">Redo Setup</button>
+        <div class="confirmation-row">
+          <span class="confirmation-label">Review Period</span>
+          <span class="confirmation-value">${escapeHtml(profile.periodStart)} — ${escapeHtml(profile.periodEnd)}</span>
         </div>
+        <div class="confirmation-row">
+          <span class="confirmation-label">GitHub</span>
+          <span class="confirmation-value">${profile.githubUsername ? escapeHtml(profile.githubUsername) : (profile.githubPat ? '●●●●●●●●' : 'Not set')}</span>
+        </div>
+      </div>
+      <div style="margin-top: var(--spacing-lg);">
+        <button class="btn btn-secondary" id="restart-wizard-btn">Redo Setup</button>
       </div>
     </div>
   `;
 
+  const h2 = wrapper.querySelector('h2');
+  h2.textContent = `Welcome back, ${user.fullName || user.email}`;
+
+  main.appendChild(wrapper);
+
   document.getElementById('restart-wizard-btn').addEventListener('click', () => {
-    // Re-import to avoid circular dependency issues at top level
     import('./app.js').then(({ LEVELS, mapTitleToLevel }) => {
       const detectedLevel = mapTitleToLevel(user.title);
       createWizard(user, detectedLevel, LEVELS);
     });
   });
+}
+
+function subtractMonths(dateStr, months) {
+  const d = new Date(dateStr);
+  d.setMonth(d.getMonth() - months);
+  return d.toISOString().split('T')[0];
+}
+
+function todayISO() {
+  return new Date().toISOString().split('T')[0];
 }
 
 /**
@@ -63,13 +84,18 @@ export function showDashboard(user, profile) {
 export function createWizard(user, detectedLevel, levels) {
   const main = document.getElementById('main-content');
 
+  const defaultLastReview = '2025-10-31';
+
   const state = {
     currentStep: 0,
     githubPat: '',
+    githubUsername: '',
+    patValidated: false,
+    patTesting: false,
     lastReviewFeedback: '',
-    lastReviewDate: '',
-    periodStart: '',
-    periodEnd: '',
+    lastReviewDate: defaultLastReview,
+    periodStart: subtractMonths(defaultLastReview, 2),
+    periodEnd: todayISO(),
     level: detectedLevel || 'C5',
   };
 
@@ -86,7 +112,7 @@ export function createWizard(user, detectedLevel, levels) {
             : `<div></div>`
           }
           ${state.currentStep < TOTAL_STEPS - 1
-            ? `<button class="btn btn-primary" id="wizard-next">Next</button>`
+            ? `<button class="btn btn-primary" id="wizard-next"${state.currentStep === 0 && !state.patValidated ? ' disabled' : ''}>Next</button>`
             : `<button class="btn btn-primary" id="wizard-finish">Complete Setup</button>`
           }
         </div>
@@ -97,8 +123,6 @@ export function createWizard(user, detectedLevel, levels) {
   }
 
   render();
-
-  // Store render function on state so we can re-render from event handlers
   state._render = render;
 }
 
@@ -114,7 +138,7 @@ function renderProgress(currentStep) {
 
         return `
           <div class="wizard-progress-step ${cls}">
-            <span class="step-number">${i < currentStep ? '✓' : i + 1}</span>
+            <span class="step-number">${i < currentStep ? '\u2713' : i + 1}</span>
             <span class="step-label">${label}</span>
           </div>
           ${i < stepLabels.length - 1 ? '<span class="step-connector"></span>' : ''}
@@ -135,31 +159,41 @@ function renderStep(state, levels) {
 }
 
 function renderGithubTokenStep(state) {
+  const statusHtml = state.patValidated
+    ? `<div class="token-status valid">Connected as <strong>${escapeHtml(state.githubUsername)}</strong></div>`
+    : state.patTesting
+    ? `<div class="token-status">Testing connection...</div>`
+    : '';
+
   return `
     <div class="wizard-step active">
       <h2>GitHub Personal Access Token</h2>
       <p class="step-description">
-        We need a GitHub PAT to fetch your pull requests, code reviews, and contributions
+        We need a GitHub PAT to fetch your pull requests and contributions
         during the review period.
       </p>
       <div class="form-group">
         <label for="github-pat">Personal Access Token</label>
         <p class="form-hint">
-          Create a token at GitHub → Settings → Developer Settings → Personal Access Tokens.
-          It needs <code>repo</code> and <code>read:org</code> scopes.
+          Create a token at GitHub &rarr; Settings &rarr; Developer Settings &rarr; Personal Access Tokens.
+          It needs the <code>repo</code> scope.
         </p>
         <div class="token-input-wrapper">
           <input
             type="password"
             id="github-pat"
             placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-            value="${state.githubPat}"
+            value="${escapeHtml(state.githubPat)}"
             autocomplete="off"
           >
+          <button class="token-toggle" id="pat-toggle" type="button">show</button>
         </div>
-        <div id="pat-status" class="token-status"></div>
-        <div id="pat-error" class="form-error">Token must start with "ghp_" or "github_pat_" and be at least 30 characters.</div>
+        ${statusHtml}
+        <div id="pat-error" class="form-error">Token must start with "ghp_" or "github_pat_".</div>
       </div>
+      <button class="btn btn-secondary" id="test-pat-btn"${!state.githubPat || state.patTesting ? ' disabled' : ''} style="margin-top:var(--spacing-sm)">
+        ${state.patTesting ? 'Testing...' : 'Test Connection'}
+      </button>
     </div>
   `;
 }
@@ -179,7 +213,7 @@ function renderFeedbackStep(state) {
           id="review-feedback"
           placeholder="Paste your last review feedback here..."
           rows="8"
-        >${state.lastReviewFeedback}</textarea>
+        >${escapeHtml(state.lastReviewFeedback)}</textarea>
       </div>
     </div>
   `;
@@ -190,21 +224,25 @@ function renderDatesStep(state) {
     <div class="wizard-step active">
       <h2>Review Period</h2>
       <p class="step-description">
-        Specify the dates for your upcoming review. We'll focus on contributions
+        Specify the dates for your upcoming review. We'll fetch contributions
         within this time window.
       </p>
       <div class="form-group">
         <label for="last-review-date">Last Review Date</label>
-        <p class="form-hint">When was your most recent completed review?</p>
+        <p class="form-hint">When your last impact review ended. Defaults to end of October 2025.</p>
         <input type="date" id="last-review-date" value="${state.lastReviewDate}">
       </div>
-      <div class="form-group">
-        <label for="period-start">Review Period Start</label>
-        <input type="date" id="period-start" value="${state.periodStart}">
-      </div>
-      <div class="form-group">
-        <label for="period-end">Review Period End</label>
-        <input type="date" id="period-end" value="${state.periodEnd}">
+      <div class="date-range-row">
+        <div class="form-group">
+          <label for="period-start">Period Start</label>
+          <p class="form-hint">Auto-calculated: 2 months before last review.</p>
+          <input type="date" id="period-start" value="${state.periodStart}">
+        </div>
+        <div class="form-group">
+          <label for="period-end">Period End</label>
+          <p class="form-hint">Defaults to today.</p>
+          <input type="date" id="period-end" value="${state.periodEnd}">
+        </div>
       </div>
     </div>
   `;
@@ -221,15 +259,15 @@ function renderConfirmStep(state, levels) {
         <p class="form-hint">Auto-detected from your title. Change if incorrect.</p>
         <select id="level-override">
           ${levels.map(l =>
-            `<option value="${l.value}" ${l.value === state.level ? 'selected' : ''}>${l.label}</option>`
+            `<option value="${l.value}" ${l.value === state.level ? 'selected' : ''}>${escapeHtml(l.label)}</option>`
           ).join('')}
         </select>
       </div>
 
       <div class="confirmation-card">
         <div class="confirmation-row">
-          <span class="confirmation-label">GitHub PAT</span>
-          <span class="confirmation-value">${state.githubPat ? '●●●●●●●●' : 'Not set'}</span>
+          <span class="confirmation-label">GitHub</span>
+          <span class="confirmation-value">${state.patValidated ? escapeHtml(state.githubUsername) : (state.githubPat ? '●●●●●●●●' : 'Not set')}</span>
         </div>
         <div class="confirmation-row">
           <span class="confirmation-label">Review Feedback</span>
@@ -250,15 +288,6 @@ function renderConfirmStep(state, levels) {
       </div>
     </div>
   `;
-}
-
-function validateGithubPat(token) {
-  if (!token) return { valid: false, message: '' };
-  const isValid = (token.startsWith('ghp_') || token.startsWith('github_pat_')) && token.length >= 30;
-  return {
-    valid: isValid,
-    message: isValid ? 'Token format looks valid' : 'Token must start with "ghp_" or "github_pat_" and be at least 30 characters',
-  };
 }
 
 function collectCurrentStepData(state) {
@@ -293,22 +322,20 @@ function collectCurrentStepData(state) {
 function validateCurrentStep(state) {
   switch (state.currentStep) {
     case 0: {
-      // PAT is optional but if provided, must be valid format
-      if (state.githubPat) {
-        const { valid } = validateGithubPat(state.githubPat);
-        if (!valid) {
-          const errorEl = document.getElementById('pat-error');
-          if (errorEl) errorEl.classList.add('visible');
-          return false;
+      // PAT must be validated via the Test Connection button
+      if (!state.patValidated) {
+        const errorEl = document.getElementById('pat-error');
+        if (errorEl) {
+          errorEl.textContent = 'Please test your token before continuing.';
+          errorEl.classList.add('visible');
         }
+        return false;
       }
       return true;
     }
     case 1:
-      // Feedback is optional
       return true;
     case 2:
-      // Dates are optional but if period-end is set, period-start should be too
       if (state.periodEnd && !state.periodStart) return false;
       return true;
     case 3:
@@ -349,15 +376,11 @@ function bindEvents(state, user, levels) {
       finishBtn.textContent = 'Saving...';
 
       try {
-        await saveWizardData(user, state);
-        showDashboard(user, {
-          level: state.level,
-          periodStart: state.periodStart,
-          periodEnd: state.periodEnd,
-          githubPat: state.githubPat,
-        });
+        // Delegate save + fetch to app.js
+        const { onWizardComplete } = await import('./app.js');
+        await onWizardComplete(user, state);
       } catch (e) {
-        console.error('Failed to save wizard data:', e);
+        console.error('Failed to complete setup:', e);
         finishBtn.disabled = false;
         finishBtn.textContent = 'Complete Setup';
         alert('Failed to save. Please try again.');
@@ -365,33 +388,92 @@ function bindEvents(state, user, levels) {
     });
   }
 
-  // PAT validation on input
+  // PAT show/hide toggle
+  const patToggle = document.getElementById('pat-toggle');
   const patInput = document.getElementById('github-pat');
+  if (patToggle && patInput) {
+    patToggle.addEventListener('click', () => {
+      const isPassword = patInput.type === 'password';
+      patInput.type = isPassword ? 'text' : 'password';
+      patToggle.textContent = isPassword ? 'hide' : 'show';
+    });
+  }
+
+  // PAT input change — reset validation
   if (patInput) {
     patInput.addEventListener('input', () => {
-      const value = patInput.value.trim();
-      const statusEl = document.getElementById('pat-status');
+      state.githubPat = patInput.value.trim();
+      state.patValidated = false;
+      state.githubUsername = '';
       const errorEl = document.getElementById('pat-error');
+      if (errorEl) errorEl.classList.remove('visible');
 
-      if (!value) {
-        statusEl.innerHTML = '';
-        statusEl.className = 'token-status';
-        errorEl.classList.remove('visible');
+      // Update Next button state
+      const next = document.getElementById('wizard-next');
+      if (next) next.disabled = true;
+
+      // Update test button state
+      const testBtn = document.getElementById('test-pat-btn');
+      if (testBtn) testBtn.disabled = !state.githubPat;
+    });
+  }
+
+  // Test Connection button
+  const testBtn = document.getElementById('test-pat-btn');
+  if (testBtn) {
+    testBtn.addEventListener('click', async () => {
+      collectCurrentStepData(state);
+
+      if (!isValidPATFormat(state.githubPat)) {
+        const errorEl = document.getElementById('pat-error');
+        if (errorEl) {
+          errorEl.textContent = 'Token must start with "ghp_" or "github_pat_" and be at least 30 characters.';
+          errorEl.classList.add('visible');
+        }
         return;
       }
 
-      const { valid, message } = validateGithubPat(value);
-      statusEl.textContent = message;
-      statusEl.className = `token-status ${valid ? 'valid' : 'invalid'}`;
-      errorEl.classList.remove('visible');
+      state.patTesting = true;
+      state._render();
+
+      try {
+        const ghUser = await testPAT(state.githubPat);
+        state.patValidated = true;
+        state.githubUsername = ghUser.login;
+        state.patTesting = false;
+        state._render();
+      } catch (err) {
+        state.patTesting = false;
+        state.patValidated = false;
+        state._render();
+        const errorEl = document.getElementById('pat-error');
+        if (errorEl) {
+          errorEl.textContent = err.message;
+          errorEl.classList.add('visible');
+        }
+      }
+    });
+  }
+
+  // Date auto-calculation: changing last review date updates period start
+  const lastReviewInput = document.getElementById('last-review-date');
+  const periodStartInput = document.getElementById('period-start');
+  if (lastReviewInput && periodStartInput) {
+    lastReviewInput.addEventListener('change', () => {
+      state.lastReviewDate = lastReviewInput.value;
+      state.periodStart = subtractMonths(lastReviewInput.value, 2);
+      periodStartInput.value = state.periodStart;
     });
   }
 }
 
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 async function saveWizardData(user, state) {
   const users = quick.db.collection('users');
-
-  // Check if user already exists
   const existing = await users.where({ email: user.email }).find();
 
   const data = {
@@ -400,6 +482,7 @@ async function saveWizardData(user, state) {
     title: user.title,
     level: state.level,
     githubPat: state.githubPat,
+    githubUsername: state.githubUsername,
     lastReviewFeedback: state.lastReviewFeedback,
     lastReviewDate: state.lastReviewDate,
     periodStart: state.periodStart,
